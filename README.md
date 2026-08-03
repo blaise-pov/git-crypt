@@ -2,6 +2,9 @@
 
 ## Updates
 
+- Add full UTF-8 path support on Windows for proper handling of non-ASCII filenames
+- Extend key decryption to support multiple versions and all .gpg files in version directories
+- Fix std streams initialization order for reliable binary mode on Windows
 - Fix build issue
 - Add support for worktree https://github.com/AGWA/git-crypt/pull/222, https://github.com/AGWA/git-crypt/issues/105
 - Add support for merge https://github.com/AGWA/git-crypt/pull/180
