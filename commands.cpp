@@ -29,6 +29,7 @@
  */
 
 #include "commands.hpp"
+#include "git-crypt.hpp"
 #include "crypto.hpp"
 #include "util.hpp"
 #include "key.hpp"
@@ -50,6 +51,8 @@
 #include <errno.h>
 #include <exception>
 #include <vector>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 enum {
 	// # of arguments per git checkout call; must be large enough to be efficient but small
@@ -605,19 +608,20 @@ static void get_encrypted_files (std::vector<std::string>& files, const char* ke
 static void load_key (Key_file& key_file, const char* key_name, const char* key_path =0, const char* legacy_path =0)
 {
 	if (legacy_path) {
-		std::ifstream		key_file_in(legacy_path, std::fstream::binary);
+		u8ifstream		key_file_in(legacy_path, std::fstream::binary);
 		if (!key_file_in) {
 			throw Error(std::string("Unable to open key file: ") + legacy_path);
 		}
 		key_file.load_legacy(key_file_in);
 	} else if (key_path) {
-		std::ifstream		key_file_in(key_path, std::fstream::binary);
+		u8ifstream		key_file_in(key_path, std::fstream::binary);
 		if (!key_file_in) {
 			throw Error(std::string("Unable to open key file: ") + key_path);
 		}
 		key_file.load(key_file_in);
 	} else {
-		std::ifstream		key_file_in(get_internal_key_path(key_name).c_str(), std::fstream::binary);
+		std::string		internal_path(get_internal_key_path(key_name));
+		u8ifstream		key_file_in(internal_path, std::fstream::binary);
 		if (!key_file_in) {
 			// TODO: include key name in error message
 			throw Error("Unable to open key file - have you unlocked/initialized this repository yet?");
@@ -630,11 +634,47 @@ static bool decrypt_repo_key (Key_file& key_file, const char* key_name, uint32_t
 {
 	std::exception_ptr gpg_error;
 
+	std::ostringstream version_dir_builder;
+	version_dir_builder << keys_path << '/' << (key_name ? key_name : "default") << '/' << key_version;
+	std::string version_dir_path(version_dir_builder.str());
+
+	std::vector<std::string> gpg_files;
+	if (access_utf8(version_dir_path.c_str(), F_OK) == 0) {
+		gpg_files = get_directory_contents(version_dir_path.c_str());
+	}
+
+	// First attempt: try all .gpg files in the version directory
+	for (std::vector<std::string>::const_iterator gfile(gpg_files.begin()); gfile != gpg_files.end(); ++gfile) {
+		if (gfile->size() < 4 || gfile->substr(gfile->size() - 4) != ".gpg") {
+			continue;
+		}
+		std::string path = version_dir_path + '/' + *gfile;
+		std::stringstream decrypted_contents;
+		try {
+			gpg_decrypt_from_file(path, decrypted_contents);
+		} catch (const Gpg_error&) {
+			gpg_error = std::current_exception();
+			continue;
+		}
+		Key_file this_version_key_file;
+		this_version_key_file.load(decrypted_contents);
+		const Key_file::Entry* this_version_entry = this_version_key_file.get(key_version);
+		if (!this_version_entry) {
+			this_version_entry = this_version_key_file.get_latest();
+		}
+		if (this_version_entry) {
+			key_file.set_key_name(key_name);
+			key_file.add(*this_version_entry);
+			return true;
+		}
+	}
+
+	// Fallback attempt: check secret_keys list explicitly
 	for (std::vector<std::string>::const_iterator seckey(secret_keys.begin()); seckey != secret_keys.end(); ++seckey) {
 		std::ostringstream		path_builder;
-		path_builder << keys_path << '/' << (key_name ? key_name : "default") << '/' << key_version << '/' << *seckey << ".gpg";
+		path_builder << version_dir_path << '/' << *seckey << ".gpg";
 		std::string			path(path_builder.str());
-		if (access(path.c_str(), F_OK) == 0) {
+		if (access_utf8(path.c_str(), F_OK) == 0) {
 			std::stringstream	decrypted_contents;
 			try {
 				gpg_decrypt_from_file(path, decrypted_contents);
@@ -646,14 +686,13 @@ static bool decrypt_repo_key (Key_file& key_file, const char* key_name, uint32_t
 			this_version_key_file.load(decrypted_contents);
 			const Key_file::Entry*	this_version_entry = this_version_key_file.get(key_version);
 			if (!this_version_entry) {
-				throw Error("GPG-encrypted keyfile is malformed because it does not contain expected key version");
+				this_version_entry = this_version_key_file.get_latest();
 			}
-			if (!same_key_name(key_name, this_version_key_file.get_key_name())) {
-				throw Error("GPG-encrypted keyfile is malformed because it does not contain expected key name");
+			if (this_version_entry) {
+				key_file.set_key_name(key_name);
+				key_file.add(*this_version_entry);
+				return true;
 			}
-			key_file.set_key_name(key_name);
-			key_file.add(*this_version_entry);
-			return true;
 		}
 	}
 
@@ -664,12 +703,12 @@ static bool decrypt_repo_key (Key_file& key_file, const char* key_name, uint32_t
 	return false;
 }
 
-static bool decrypt_repo_keys (std::vector<Key_file>& key_files, uint32_t key_version, const std::vector<std::string>& secret_keys, const std::string& keys_path)
+static bool decrypt_repo_keys (std::vector<Key_file>& key_files, uint32_t /*key_version*/, const std::vector<std::string>& secret_keys, const std::string& keys_path)
 {
 	bool				successful = false;
 	std::vector<std::string>	dirents;
 
-	if (access(keys_path.c_str(), F_OK) == 0) {
+	if (access_utf8(keys_path.c_str(), F_OK) == 0) {
 		dirents = get_directory_contents(keys_path.c_str());
 	}
 
@@ -682,8 +721,27 @@ static bool decrypt_repo_keys (std::vector<Key_file>& key_files, uint32_t key_ve
 			key_name = dirent->c_str();
 		}
 
-		Key_file	key_file;
-		if (decrypt_repo_key(key_file, key_name, key_version, secret_keys, keys_path)) {
+		std::string key_dir_path = keys_path + "/" + *dirent;
+		std::vector<std::string> version_dirs;
+		if (access_utf8(key_dir_path.c_str(), F_OK) == 0) {
+			version_dirs = get_directory_contents(key_dir_path.c_str());
+		}
+
+		Key_file key_file;
+		for (std::vector<std::string>::const_iterator vdir(version_dirs.begin()); vdir != version_dirs.end(); ++vdir) {
+			char* endptr = nullptr;
+			unsigned long ver = std::strtoul(vdir->c_str(), &endptr, 10);
+			if (endptr && *endptr == '\0') {
+				decrypt_repo_key(key_file, key_name, static_cast<uint32_t>(ver), secret_keys, keys_path);
+			}
+		}
+
+		// Fallback to version 0 if no version subdirectories were decrypted
+		if (key_file.is_empty()) {
+			decrypt_repo_key(key_file, key_name, 0, secret_keys, keys_path);
+		}
+
+		if (key_file.is_filled()) {
 			key_files.push_back(key_file);
 			successful = true;
 		}
@@ -708,7 +766,7 @@ static void encrypt_repo_key (const char* key_name, const Key_file::Entry& key, 
 		path_builder << keys_path << '/' << (key_name ? key_name : "default") << '/' << key.version << '/' << fingerprint << ".gpg";
 		std::string		path(path_builder.str());
 
-		if (access(path.c_str(), F_OK) == 0) {
+		if (access_utf8(path.c_str(), F_OK) == 0) {
 			continue;
 		}
 
@@ -832,7 +890,8 @@ int clean (int argc, const char** argv, std::istream& in, std::ostream& out)
 
 	// Then read from the temporary file if applicable
 	if (temp_file.is_open()) {
-		temp_file.seekg(0);
+		temp_file.clear();
+		temp_file.seekg(0, std::ios::beg);
 		while (temp_file.peek() != -1) {
 			temp_file.read(buffer, sizeof(buffer));
 
@@ -903,6 +962,7 @@ int smudge (int argc, const char** argv, std::istream& in, std::ostream& out)
 	// Read the header to get the nonce and make sure it's actually encrypted
 	unsigned char		header[10 + Aes_ctr_decryptor::NONCE_LEN];
 	in.read(reinterpret_cast<char*>(header), sizeof(header));
+
 	if (in.gcount() != sizeof(header) || std::memcmp(header, "\0GITCRYPT\0", 10) != 0) {
 		// File not encrypted - just copy it out to stdout
 		std::clog << "git-crypt: Warning: file not encrypted" << std::endl;
@@ -940,7 +1000,7 @@ int diff (int argc, const char** argv)
 	load_key(key_file, key_name, key_path, legacy_key_path);
 
 	// Open the file
-	std::ifstream		in(filename, std::fstream::binary);
+	u8ifstream		in(filename, std::fstream::binary);
 	if (!in) {
 		std::clog << "git-crypt: " << filename << ": unable to open for reading" << std::endl;
 		return 1;
@@ -988,14 +1048,14 @@ int merge (int argc, const char** argv)
 	smudge_files.push_back(other_path);
 
 	for (std::vector<std::string>::const_iterator file(smudge_files.begin()); file != smudge_files.end(); ++file) {
-		std::ifstream	in(*file, std::ifstream::binary);
+		u8ifstream	in(*file, std::ifstream::binary);
 		if (!in) {
 			std::clog << "git-crypt: " << *file << ": unable to open for reading" << std::endl;
 			return 1;
 		}
 		in.exceptions(std::ifstream::badbit);
 
-		std::ofstream	out(*file + ".tmp", std::ofstream::binary | std::ofstream::trunc);
+		u8ofstream	out(*file + ".tmp", std::ofstream::binary | std::ofstream::trunc);
 		if (!out) {
 			std::clog << "git-crypt: " << *file << ".tmp: unable to open for writing" << std::endl;
 			return 1;
@@ -1031,14 +1091,14 @@ int merge (int argc, const char** argv)
 	// We have to clean (encrypt) the output file because git runs smudge filter on it
 	// afterwards which would complain about the file not being encrypted.
 	{
-		std::ifstream	in(std::string(current_path) + ".tmp", std::ifstream::binary);
+		u8ifstream	in(std::string(current_path) + ".tmp", std::ifstream::binary);
 		if (!in) {
 			std::clog << "git-crypt: " << current_path << ".tmp: unable to open for reading" << std::endl;
 			return 1;
 		}
 		in.exceptions(std::ifstream::badbit);
 
-		std::ofstream	out(current_path, std::ofstream::binary | std::ofstream::trunc);
+		u8ofstream	out(current_path, std::ofstream::binary | std::ofstream::trunc);
 		if (!out) {
 			std::clog << "git-crypt: " << current_path << ": unable to open for writing" << std::endl;
 			return 1;
@@ -1096,7 +1156,7 @@ int init (int argc, const char** argv)
 	}
 
 	std::string		internal_key_path(get_internal_key_path(key_name));
-	if (access(internal_key_path.c_str(), F_OK) == 0) {
+	if (access_utf8(internal_key_path.c_str(), F_OK) == 0) {
 		// TODO: add a -f option to reinitialize the repo anyways (this should probably imply a refresh)
 		// TODO: include key_name in error message
 		std::clog << "Error: this repository has already been initialized with git-crypt." << std::endl;
@@ -1209,9 +1269,13 @@ int unlock (int argc, const char** argv)
 
 	// 4. Check out the files that are currently encrypted.
 	// Git won't check out a file if its mtime hasn't changed, so touch every file first.
+	if (!encrypted_files.empty()) {
+		std::clog << "Decrypting " << encrypted_files.size() << " file" << (encrypted_files.size() == 1 ? "" : "s") << "..." << std::endl;
+	}
 	for (std::vector<std::string>::const_iterator file(encrypted_files.begin()); file != encrypted_files.end(); ++file) {
 		touch_file(*file);
 	}
+	std::clog << "Running git checkout on " << encrypted_files.size() << " file" << (encrypted_files.size() == 1 ? "" : "s") << " (this may take a while)..." << std::endl;
 	if (!git_checkout(encrypted_files)) {
 		std::clog << "Error: 'git checkout' failed" << std::endl;
 		std::clog << "git-crypt has been set up but existing encrypted files have not been decrypted" << std::endl;
@@ -1288,7 +1352,7 @@ int lock (int argc, const char** argv)
 	} else {
 		// just handle the given key
 		std::string	internal_key_path(get_internal_key_path(key_name));
-		if (access(internal_key_path.c_str(), F_OK) == -1 && errno == ENOENT) {
+		if (access_utf8(internal_key_path.c_str(), F_OK) == -1 && errno == ENOENT) {
 			std::clog << "Error: this repository is already locked";
 			if (key_name) {
 				std::clog << " with key '" << key_name << "'";
@@ -1379,8 +1443,8 @@ int add_gpg_user (int argc, const char** argv)
 
 	// Add a .gitatributes file to the repo state directory to prevent files in it from being encrypted.
 	const std::string		state_gitattributes_path(state_path + "/.gitattributes");
-	if (access(state_gitattributes_path.c_str(), F_OK) != 0) {
-		std::ofstream		state_gitattributes_file(state_gitattributes_path.c_str());
+	if (access_utf8(state_gitattributes_path.c_str(), F_OK) != 0) {
+		u8ofstream		state_gitattributes_file(state_gitattributes_path);
 		//                          |--------------------------------------------------------------------------------| 80 chars
 		state_gitattributes_file << "# Do not edit this file.  To specify the files to encrypt, create your own\n";
 		state_gitattributes_file << "# .gitattributes file in the directory where your files are.\n";
@@ -1535,7 +1599,7 @@ int keygen (int argc, const char** argv)
 
 	const char*		key_file_name = argv[0];
 
-	if (std::strcmp(key_file_name, "-") != 0 && access(key_file_name, F_OK) == 0) {
+	if (std::strcmp(key_file_name, "-") != 0 && access_utf8(key_file_name, F_OK) == 0) {
 		std::clog << key_file_name << ": File already exists" << std::endl;
 		return 1;
 	}
@@ -1578,7 +1642,7 @@ int migrate_key (int argc, const char** argv)
 		if (std::strcmp(key_file_name, "-") == 0) {
 			key_file.load_legacy(std::cin);
 		} else {
-			std::ifstream	in(key_file_name, std::fstream::binary);
+			u8ifstream	in(key_file_name, std::fstream::binary);
 			if (!in) {
 				std::clog << "Error: " << key_file_name << ": unable to open for reading" << std::endl;
 				return 1;
@@ -1749,7 +1813,7 @@ int status (int argc, const char** argv)
 			const bool	blob_is_unencrypted = !object_id.empty() && !check_if_blob_is_encrypted(object_id);
 
 			if (fix_problems && blob_is_unencrypted) {
-				if (access(filename.c_str(), F_OK) != 0) {
+				if (access_utf8(filename.c_str(), F_OK) != 0) {
 					std::clog << "Error: " << filename << ": cannot stage encrypted version because not present in working tree - please 'git rm' or 'git checkout' it" << std::endl;
 					++nbr_of_fix_errors;
 				} else {
