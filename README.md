@@ -1,5 +1,11 @@
 # Forked from [AGWA/git-crypt](https://github.com/AGWA/git-crypt)
 
+## ⚠️ **Windows users: Fixed "CreateFileA" error!**
+
+**If you got `git-crypt: System error: CreateFileA:` errors on Windows with non-ASCII filenames — this fork fixes it.**
+
+Full UTF-8 path support added: all file operations now use Unicode-aware APIs on Windows.
+
 ## Updates
 
 - Add full UTF-8 path support on Windows for proper handling of non-ASCII filenames
