@@ -79,5 +79,61 @@ void		create_protected_file (const char* path); // create empty file accessible 
 int		util_rename (const char*, const char*);
 std::vector<std::string> get_directory_contents (const char* path);
 
+#ifdef _WIN32
+#include <io.h>
+#ifndef F_OK
+#define F_OK 0
+#endif
+#ifndef R_OK
+#define R_OK 4
+#endif
+#ifndef W_OK
+#define W_OK 2
+#endif
+#ifndef X_OK
+#define X_OK 1
+#endif
+
+std::wstring utf8_to_utf16 (const std::string& utf8);
+std::string utf16_to_utf8 (const std::wstring& utf16);
+int access_utf8 (const char* path, int mode);
+int open_file_utf8 (const char* path, int flags, int pmode);
+
+class u8ifstream : public std::ifstream {
+public:
+	u8ifstream () { }
+	explicit u8ifstream (const char* filename, std::ios_base::openmode mode = std::ios_base::in)
+		: std::ifstream(utf8_to_utf16(filename).c_str(), mode) { }
+	explicit u8ifstream (const std::string& filename, std::ios_base::openmode mode = std::ios_base::in)
+		: std::ifstream(utf8_to_utf16(filename).c_str(), mode) { }
+	void open (const char* filename, std::ios_base::openmode mode = std::ios_base::in) {
+		std::ifstream::open(utf8_to_utf16(filename).c_str(), mode);
+	}
+	void open (const std::string& filename, std::ios_base::openmode mode = std::ios_base::in) {
+		std::ifstream::open(utf8_to_utf16(filename).c_str(), mode);
+	}
+};
+
+class u8ofstream : public std::ofstream {
+public:
+	u8ofstream () { }
+	explicit u8ofstream (const char* filename, std::ios_base::openmode mode = std::ios_base::out)
+		: std::ofstream(utf8_to_utf16(filename).c_str(), mode) { }
+	explicit u8ofstream (const std::string& filename, std::ios_base::openmode mode = std::ios_base::out)
+		: std::ofstream(utf8_to_utf16(filename).c_str(), mode) { }
+	void open (const char* filename, std::ios_base::openmode mode = std::ios_base::out) {
+		std::ofstream::open(utf8_to_utf16(filename).c_str(), mode);
+	}
+	void open (const std::string& filename, std::ios_base::openmode mode = std::ios_base::out) {
+		std::ofstream::open(utf8_to_utf16(filename).c_str(), mode);
+	}
+};
+#else
+#include <unistd.h>
+inline int access_utf8 (const char* path, int mode) { return access(path, mode); }
+typedef std::ifstream u8ifstream;
+typedef std::ofstream u8ofstream;
+#endif
+
 #endif
 
