@@ -85,19 +85,20 @@ static HANDLE spawn_command (const std::vector<std::string>& command, HANDLE std
 	PROCESS_INFORMATION	proc_info;
 	ZeroMemory(&proc_info, sizeof(proc_info));
 
-	STARTUPINFO		start_info;
+	STARTUPINFOW		start_info;
 	ZeroMemory(&start_info, sizeof(start_info));
 
-	start_info.cb = sizeof(STARTUPINFO);
+	start_info.cb = sizeof(STARTUPINFOW);
 	start_info.hStdInput = stdin_handle ? stdin_handle : GetStdHandle(STD_INPUT_HANDLE);
 	start_info.hStdOutput = stdout_handle ? stdout_handle : GetStdHandle(STD_OUTPUT_HANDLE);
 	start_info.hStdError = stderr_handle ? stderr_handle : GetStdHandle(STD_ERROR_HANDLE);
 	start_info.dwFlags |= STARTF_USESTDHANDLES;
 
 	std::string		cmdline(format_cmdline(command));
+	std::wstring	wcmdline(utf8_to_utf16(cmdline));
 
-	if (!CreateProcessA(nullptr,		// application name (nullptr to use command line)
-				const_cast<char*>(cmdline.c_str()),
+	if (!CreateProcessW(nullptr,		// application name (nullptr to use command line)
+				const_cast<wchar_t*>(wcmdline.c_str()),
 				nullptr,	// process security attributes
 				nullptr,	// primary thread security attributes
 				TRUE,		// handles are inherited
@@ -106,7 +107,7 @@ static HANDLE spawn_command (const std::vector<std::string>& command, HANDLE std
 				nullptr,	// use parent's current directory
 				&start_info,
 				&proc_info)) {
-		throw System_error("CreateProcess", cmdline, GetLastError());
+		throw System_error("CreateProcessW", cmdline, GetLastError());
 	}
 
 	CloseHandle(proc_info.hThread);
