@@ -140,14 +140,14 @@ static void	init_std_streams_platform (); // platform-specific initialization
 
 void		init_std_streams ()
 {
+	init_std_streams_platform();
+
 	// The following two lines are essential for achieving good performance:
 	std::ios_base::sync_with_stdio(false);
 	std::cin.tie(0);
 
 	std::cin.exceptions(std::ios_base::badbit);
 	std::cout.exceptions(std::ios_base::badbit);
-
-	init_std_streams_platform();
 }
 
 #ifdef _WIN32
